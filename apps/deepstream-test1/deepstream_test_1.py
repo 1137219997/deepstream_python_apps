@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 ################################################################################
-# SPDX-FileCopyrightText: Copyright (c) 2019-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2019-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +23,7 @@ import os
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import GLib, Gst
-from common.platform_info import PlatformInfo
+from common.is_aarch_64 import is_aarch64
 from common.bus_call import bus_call
 
 import pyds
@@ -32,7 +32,7 @@ PGIE_CLASS_ID_VEHICLE = 0
 PGIE_CLASS_ID_BICYCLE = 1
 PGIE_CLASS_ID_PERSON = 2
 PGIE_CLASS_ID_ROADSIGN = 3
-MUXER_BATCH_TIMEOUT_USEC = 33000
+
 
 def osd_sink_pad_buffer_probe(pad,info,u_data):
     frame_number=0
@@ -126,7 +126,6 @@ def main(args):
         sys.stderr.write("usage: %s <media file or uri>\n" % args[0])
         sys.exit(1)
 
-    platform_info = PlatformInfo()
     # Standard GStreamer initialization
     Gst.init(None)
 
@@ -140,22 +139,18 @@ def main(args):
 
     # Source element for reading from the file
     print("Creating Source \n ")
-    source = Gst.ElementFactory.make("filesrc", "file-source")
+    source = Gst.ElementFactory.make("v4l2src", "camera-source")
     if not source:
-        sys.stderr.write(" Unable to create Source \n")
+        sys.stderr.write(" Unable to create Camera Source \n")
+    source.set_property('device', '/dev/video0')
 
-    # Since the data format in the input file is elementary h264 stream,
-    # we need a h264parser
-    print("Creating H264Parser \n")
-    h264parser = Gst.ElementFactory.make("h264parse", "h264-parser")
-    if not h264parser:
-        sys.stderr.write(" Unable to create h264 parser \n")
+    caps_v4l2src = Gst.ElementFactory.make("capsfilter", "v4l2src_caps")
+    caps_v4l2src.set_property("caps", Gst.Caps.from_string("video/x-raw,format=YUY2,width=640,height=480,framerate=30/1"))
 
-    # Use nvdec_h264 for hardware accelerated decode on GPU
-    print("Creating Decoder \n")
-    decoder = Gst.ElementFactory.make("nvv4l2decoder", "nvv4l2-decoder")
-    if not decoder:
-        sys.stderr.write(" Unable to create Nvv4l2 Decoder \n")
+    videoconvert = Gst.ElementFactory.make("videoconvert", "convertor1")
+    nvvidconv1 = Gst.ElementFactory.make("nvvideoconvert", "nvvideo-converter1")
+    if not nvvidconv1:
+        sys.stderr.write(" Unable to create nvvidconv \n")
 
     # Create nvstreammux instance to form batches from one or more sources.
     streammux = Gst.ElementFactory.make("nvstreammux", "Stream-muxer")
@@ -180,35 +175,32 @@ def main(args):
         sys.stderr.write(" Unable to create nvosd \n")
 
     # Finally render the osd output
-    if platform_info.is_integrated_gpu():
+    if is_aarch64():
         print("Creating nv3dsink \n")
         sink = Gst.ElementFactory.make("nv3dsink", "nv3d-sink")
         if not sink:
             sys.stderr.write(" Unable to create nv3dsink \n")
     else:
-        if platform_info.is_platform_aarch64():
-            print("Creating nv3dsink \n")
-            sink = Gst.ElementFactory.make("nv3dsink", "nv3d-sink")
-        else:
-            print("Creating EGLSink \n")
-            sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
+        print("Creating EGLSink \n")
+        sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
         if not sink:
             sys.stderr.write(" Unable to create egl sink \n")
 
     print("Playing file %s " %args[1])
-    source.set_property('location', args[1])
+    # source.set_property('location', args[1]) # This line is no longer needed for file input
     if os.environ.get('USE_NEW_NVSTREAMMUX') != 'yes': # Only set these properties if not using new gst-nvstreammux
         streammux.set_property('width', 1920)
         streammux.set_property('height', 1080)
-        streammux.set_property('batched-push-timeout', MUXER_BATCH_TIMEOUT_USEC)
+        streammux.set_property('batched-push-timeout', 4000000)
     
     streammux.set_property('batch-size', 1)
     pgie.set_property('config-file-path', "dstest1_pgie_config.txt")
 
     print("Adding elements to Pipeline \n")
     pipeline.add(source)
-    pipeline.add(h264parser)
-    pipeline.add(decoder)
+    pipeline.add(caps_v4l2src)
+    pipeline.add(videoconvert)
+    pipeline.add(nvvidconv1)
     pipeline.add(streammux)
     pipeline.add(pgie)
     pipeline.add(nvvidconv)
@@ -219,16 +211,10 @@ def main(args):
     # file-source -> h264-parser -> nvh264-decoder ->
     # nvinfer -> nvvidconv -> nvosd -> video-renderer
     print("Linking elements in the Pipeline \n")
-    source.link(h264parser)
-    h264parser.link(decoder)
-
-    sinkpad = streammux.request_pad_simple("sink_0")
-    if not sinkpad:
-        sys.stderr.write(" Unable to get the sink pad of streammux \n")
-    srcpad = decoder.get_static_pad("src")
-    if not srcpad:
-        sys.stderr.write(" Unable to get source pad of decoder \n")
-    srcpad.link(sinkpad)
+    source.link(caps_v4l2src)
+    caps_v4l2src.link(videoconvert)
+    videoconvert.link(nvvidconv1)
+    nvvidconv1.link(streammux)
     streammux.link(pgie)
     pgie.link(nvvidconv)
     nvvidconv.link(nvosd)
