@@ -107,10 +107,13 @@ def main(args):
     if not videoconvert:
         sys.stderr.write(" Unable to create videoconvert \n")
     caps = Gst.ElementFactory.make("capsfilter", "caps")
-    caps.set_property("caps", Gst.Caps.from_string("video/x-raw,format=NV12,width=640,height=480,framerate=30/1"))
+    # 这里可以根据实际摄像头格式调整 format 和分辨率
+    caps.set_property("caps", Gst.Caps.from_string("video/x-raw,format=I420,width=640,height=480,framerate=30/1"))
     nvvidconv = Gst.ElementFactory.make("nvvideoconvert", "nvvideo-converter")
     if not nvvidconv:
         sys.stderr.write(" Unable to create nvvideoconvert \n")
+    caps_nvmm = Gst.ElementFactory.make("capsfilter", "caps_nvmm")
+    caps_nvmm.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM),format=NV12,width=640,height=480,framerate=30/1"))
     streammux = Gst.ElementFactory.make("nvstreammux", "Stream-muxer")
     if not streammux:
         sys.stderr.write(" Unable to create NvStreamMux \n")
@@ -137,6 +140,7 @@ def main(args):
     pipeline.add(videoconvert)
     pipeline.add(caps)
     pipeline.add(nvvidconv)
+    pipeline.add(caps_nvmm)
     pipeline.add(streammux)
     pipeline.add(pgie)
     pipeline.add(nvvidconv2)
@@ -146,12 +150,13 @@ def main(args):
     source.link(videoconvert)
     videoconvert.link(caps)
     caps.link(nvvidconv)
+    nvvidconv.link(caps_nvmm)
+    srcpad = caps_nvmm.get_static_pad("src")
     sinkpad = streammux.get_request_pad("sink_0")
     if not sinkpad:
         sys.stderr.write(" Unable to get the sink pad of streammux \n")
-    srcpad = nvvidconv.get_static_pad("src")
     if not srcpad:
-        sys.stderr.write(" Unable to get source pad of nvvidconv \n")
+        sys.stderr.write(" Unable to get source pad of caps_nvmm \n")
     srcpad.link(sinkpad)
     streammux.link(pgie)
     pgie.link(nvvidconv2)
